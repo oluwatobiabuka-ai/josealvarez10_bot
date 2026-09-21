@@ -52,6 +52,16 @@ MAX_INPUT_CHARS = 3000
 # Set SHOW_ERRORS=1 in Railway to make the bot show the real error in the chat
 # (for testing only; turn it off before real users arrive).
 SHOW_ERRORS = os.getenv("SHOW_ERRORS", "0") == "1"
+# Set BOT_PAUSED=1 to put the bot on a break: it answers everyone with a friendly
+# message and makes no AI calls. Remove the variable (or set 0) to turn it back on.
+BOT_PAUSED = os.getenv("BOT_PAUSED", "0") == "1"
+
+PAUSED_MESSAGE = (
+    "Hi, it's Jose \U0001F49B I'm taking a short break right now, but I'll be back soon. "
+    "Please check in again in a little while.\n\n"
+    "If you're going through something urgent or you feel unsafe, please reach out "
+    "to someone you trust or your local emergency or support services."
+)
 
 BOT_NAME = "Jose Alvarez"
 
@@ -161,6 +171,9 @@ def system_prompt_for(chat_id: int) -> str:
 
 # ------------------------------ Handlers ------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if BOT_PAUSED:
+        await update.message.reply_text(PAUSED_MESSAGE)
+        return
     await update.message.reply_text(WELCOME, reply_markup=topic_keyboard())
 
 
@@ -168,12 +181,18 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     histories.pop(chat_id, None)
     topics.pop(chat_id, None)
+    if BOT_PAUSED:
+        await update.message.reply_text(PAUSED_MESSAGE)
+        return
     await update.message.reply_text(WELCOME, reply_markup=topic_keyboard())
 
 
 async def choose_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()  # stops the loading spinner on the button
+    if BOT_PAUSED:
+        await context.bot.send_message(update.effective_chat.id, PAUSED_MESSAGE)
+        return
     key = (query.data or "").split(":", 1)[-1]
     if key not in TOPICS:
         return
@@ -189,6 +208,10 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     text = update.message.text
+
+    if BOT_PAUSED:
+        await update.message.reply_text(PAUSED_MESSAGE)
+        return
 
     if len(text) > MAX_INPUT_CHARS:
         await update.message.reply_text(
@@ -235,6 +258,9 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             history.pop()  # drop the unanswered message so history stays valid
             refund_quota(user_id)
             message = "Sorry, I'm having trouble right now. Please try again in a moment."
+            if isinstance(e, anthropic.BadRequestError) and "credit balance" in str(e).lower():
+                logging.error("Claude API credit balance is too low: add credits in the Console")
+                message = PAUSED_MESSAGE
             if SHOW_ERRORS:
                 message += f"\n\n[debug] {type(e).__name__}: {str(e)[:300]}"
             await update.message.reply_text(message)
