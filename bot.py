@@ -49,6 +49,9 @@ MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "21"))
 DAILY_MESSAGE_LIMIT = int(os.getenv("DAILY_MESSAGE_LIMIT", "60"))
 MAX_CONCURRENT_API_CALLS = int(os.getenv("MAX_CONCURRENT_API_CALLS", "10"))
 MAX_INPUT_CHARS = 3000
+# Set SHOW_ERRORS=1 in Railway to make the bot show the real error in the chat
+# (for testing only; turn it off before real users arrive).
+SHOW_ERRORS = os.getenv("SHOW_ERRORS", "0") == "1"
 
 BOT_NAME = "Jose Alvarez"
 
@@ -227,13 +230,14 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "Please try again in a minute."
             )
             return
-        except Exception:
+        except Exception as e:
             logging.exception("Claude API call failed")
             history.pop()  # drop the unanswered message so history stays valid
             refund_quota(user_id)
-            await update.message.reply_text(
-                "Sorry, I'm having trouble right now. Please try again in a moment."
-            )
+            message = "Sorry, I'm having trouble right now. Please try again in a moment."
+            if SHOW_ERRORS:
+                message += f"\n\n[debug] {type(e).__name__}: {str(e)[:300]}"
+            await update.message.reply_text(message)
             return
 
         history.append({"role": "assistant", "content": reply})
