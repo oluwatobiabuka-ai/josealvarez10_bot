@@ -36,6 +36,9 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+# httpx logs every request URL at INFO level, and Telegram URLs contain the bot
+# token. Raising its level keeps the token out of your logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # ----------------------------- Settings ------------------------------------
 # To save money, try a cheaper model, e.g. BOT_MODEL=claude-haiku-4-5-20251001
