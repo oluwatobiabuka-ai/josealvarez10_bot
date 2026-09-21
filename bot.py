@@ -21,10 +21,11 @@ import os
 from datetime import datetime, timezone
 
 import anthropic
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -46,7 +47,10 @@ DAILY_MESSAGE_LIMIT = int(os.getenv("DAILY_MESSAGE_LIMIT", "60"))
 MAX_CONCURRENT_API_CALLS = int(os.getenv("MAX_CONCURRENT_API_CALLS", "10"))
 MAX_INPUT_CHARS = 3000
 
-SYSTEM_PROMPT = """You are a warm, emotionally intelligent relationship companion.
+BOT_NAME = "Jose Alvarez"
+
+SYSTEM_PROMPT = f"""You are {BOT_NAME}, a warm, emotionally intelligent companion who helps
+people think through their relationships: romantic, family, and friendship.
 Your style: friendly, non-judgmental, conversational, never clinical.
 
 How you work:
@@ -55,22 +59,47 @@ How you work:
   the situation.
 - Once you understand, offer 2-3 practical options (what to say, how to
   approach the conversation, boundaries to consider). Explain your reasoning briefly.
-- You only hear one side. Never label the partner as toxic or tell the
-  user to leave based on limited information. Encourage honest communication.
+- You only hear one side. Never label the other person as toxic or tell the
+  user to cut someone off or leave based on limited information. Encourage
+  honest communication.
 - If the user describes abuse, threats, or feeling unsafe, respond with care,
   take it seriously, and encourage contacting local support services or a
   trusted person.
 - If the user seems to be in crisis or mentions self-harm, prioritize their
   safety and encourage professional help.
-- You're not a licensed therapist; say so briefly if the situation calls for one.
+- You are an AI. If anyone asks whether you're a human or an AI, answer honestly.
+  You're not a licensed therapist; say so briefly if the situation calls for one.
 - Keep replies short and natural, like a caring friend texting back.
 - Reply in the same language the user writes in."""
 
 WELCOME = (
-    "Hi, I'm here to listen. \U0001F49B\n\n"
-    "Tell me what's going on in your relationship, and we'll talk it through together.\n\n"
-    "Just so you know, I'm an AI, not a human counselor. "
-    "You can send /reset anytime to start a fresh conversation."
+    f"Hi, I'm {BOT_NAME} \U0001F4AC\n\n"
+    "I'm here to help you think through whatever's going on in your "
+    "relationships \u2014 romantic, family, or friendship.\n\n"
+    "What's on your mind?"
+)
+
+# key -> (button label, topic description given to the AI, message shown after tapping)
+TOPICS = {
+    "romance": (
+        "\u2764\ufe0f Romance",
+        "romantic relationships",
+        "Romance \u2014 okay. Tell me what's going on, and take your time.",
+    ),
+    "family": (
+        "\U0001F468\u200D\U0001F469\u200D\U0001F467 Family",
+        "family relationships",
+        "Family \u2014 okay. Tell me what's going on, and take your time.",
+    ),
+    "friendship": (
+        "\U0001F91D Friendship",
+        "friendships",
+        "Friendship \u2014 okay. Tell me what's going on, and take your time.",
+    ),
+}
+AI_NOTE = (
+    "Quick note: I'm an AI companion, not a licensed therapist, "
+    "but I'm happy to listen and think it through with you."
 )
 
 # --------------------------- Shared state -----------------------------------
@@ -79,6 +108,7 @@ WELCOME = (
 client = anthropic.AsyncAnthropic(max_retries=5, timeout=60.0)
 
 histories: dict[int, list[dict]] = {}  # chat_id -> conversation so far
+topics: dict[int, str] = {}  # chat_id -> chosen topic key
 chat_locks: dict[int, asyncio.Lock] = {}  # one message at a time per chat
 usage: dict[int, tuple[str, int]] = {}  # user_id -> (UTC date, messages today)
 api_semaphore: asyncio.Semaphore | None = None  # created once the loop is running
@@ -107,14 +137,43 @@ def refund_quota(user_id: int) -> None:
     usage[user_id] = (day, max(0, count - 1))
 
 
+def topic_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(label, callback_data=f"topic:{key}")]
+            for key, (label, _, _) in TOPICS.items()
+        ]
+    )
+
+
+def system_prompt_for(chat_id: int) -> str:
+    key = topics.get(chat_id)
+    if key in TOPICS:
+        return f"{SYSTEM_PROMPT}\n\nThe user chose to talk about: {TOPICS[key][1]}."
+    return SYSTEM_PROMPT
+
+
 # ------------------------------ Handlers ------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(WELCOME)
+    await update.message.reply_text(WELCOME, reply_markup=topic_keyboard())
 
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    histories.pop(update.effective_chat.id, None)
-    await update.message.reply_text("Okay, fresh start. What's on your mind?")
+    chat_id = update.effective_chat.id
+    histories.pop(chat_id, None)
+    topics.pop(chat_id, None)
+    await update.message.reply_text(WELCOME, reply_markup=topic_keyboard())
+
+
+async def choose_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()  # stops the loading spinner on the button
+    key = (query.data or "").split(":", 1)[-1]
+    if key not in TOPICS:
+        return
+    chat_id = update.effective_chat.id
+    topics[chat_id] = key
+    await context.bot.send_message(chat_id, f"{TOPICS[key][2]}\n\n{AI_NOTE}")
 
 
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -152,7 +211,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 response = await client.messages.create(
                     model=MODEL,
                     max_tokens=MAX_TOKENS,
-                    system=SYSTEM_PROMPT,
+                    system=system_prompt_for(chat_id),
                     messages=history,
                 )
             reply = response.content[0].text
@@ -194,6 +253,7 @@ def main() -> None:
     )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset))
+    app.add_handler(CallbackQueryHandler(choose_topic, pattern=r"^topic:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
     app.run_polling()
 
